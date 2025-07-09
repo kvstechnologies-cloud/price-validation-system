@@ -2,6 +2,7 @@
 const express = require('express');
 const multer = require('multer');
 const Papa = require('papaparse');
+const XLSX = require('xlsx');
 const router = express.Router();
 
 // Import your InsuranceItemPricer
@@ -20,7 +21,96 @@ try {
 // Configure multer for file uploads
 const upload = multer({ storage: multer.memoryStorage() });
 
-// CSV Processing Route - matches your interface expectations
+// Helper function to detect flexible column names
+function detectColumns(headers) {
+  const columnMap = {};
+  
+  headers.forEach(header => {
+    const normalizedHeader = header.trim().toLowerCase();
+    
+    // Check for Description/Desc column (handles both variants)
+    if (normalizedHeader === 'description' || normalizedHeader === 'desc') {
+      columnMap.description = header;
+    }
+    
+    // Other required columns
+    if (normalizedHeader.includes('item') && normalizedHeader.includes('#')) {
+      columnMap.itemNumber = header;
+    }
+    if (normalizedHeader.includes('item') && normalizedHeader.includes('description')) {
+      columnMap.itemDescription = header;
+    }
+    if (normalizedHeader.includes('brand') || normalizedHeader.includes('manufacturer')) {
+      columnMap.brand = header;
+    }
+    if (normalizedHeader.includes('cost') && normalizedHeader.includes('replace')) {
+      columnMap.costToReplace = header;
+    }
+  });
+  
+  return columnMap;
+}
+
+// Helper function to parse different file types
+function parseFileData(file) {
+  if (file.originalname.endsWith('.xlsx') || file.originalname.endsWith('.xls')) {
+    // Parse Excel file
+    const workbook = XLSX.read(file.buffer, {
+      cellStyles: true,
+      cellFormulas: true,
+      cellDates: true,
+      cellNF: true,
+      sheetStubs: true
+    });
+    
+    const firstSheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[firstSheetName];
+    
+    // Convert to JSON
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, { 
+      header: 1, 
+      defval: "",
+      raw: false 
+    });
+    
+    if (jsonData.length < 2) {
+      throw new Error('Excel file must contain at least a header row and one data row');
+    }
+    
+    // Convert to object format with headers
+    const headers = jsonData[0];
+    const csvData = jsonData.slice(1).map(row => {
+      const obj = {};
+      headers.forEach((header, index) => {
+        obj[header] = row[index] || '';
+      });
+      return obj;
+    });
+    
+    return csvData;
+  } else {
+    // Parse CSV file
+    const csvText = file.buffer.toString('utf-8');
+    const parseResult = Papa.parse(csvText, {
+      header: true,
+      skipEmptyLines: true,
+      dynamicTyping: true
+    });
+    
+    if (parseResult.errors.length > 0) {
+      console.error('CSV parsing errors:', parseResult.errors);
+    }
+    
+    return parseResult.data;
+  }
+}
+
+// CHANGE: Add delay helper function to avoid rate limiting
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// CSV Processing Route - Process ALL rows with better error handling
 router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
   try {
     if (!req.file) {
@@ -32,147 +122,171 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
       return res.status(500).json({ error: 'Pricing service not available. Check SERPAPI_KEY configuration.' });
     }
 
-    const tolerance = req.body.tolerance || 10; // Default 10% tolerance
+    const tolerance = parseInt(req.body.tolerance) || 10;
     const startTime = Date.now();
 
-    // Parse CSV file
-    const csvText = req.file.buffer.toString('utf-8');
-    const parseResult = Papa.parse(csvText, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: true
-    });
+    // Parse file data
+    const csvData = parseFileData(req.file);
+    console.log(`📊 Processing ${csvData.length} rows from ${req.file.originalname}`);
 
-    if (parseResult.errors.length > 0) {
-      console.error('CSV parsing errors:', parseResult.errors);
-    }
-
-    const csvData = parseResult.data;
-    console.log(`📊 Processing ${csvData.length} rows from CSV`);
+    // Detect column mappings flexibly
+    const headers = Object.keys(csvData[0] || {});
+    const columnMap = detectColumns(headers);
+    console.log('🔧 Detected columns:', columnMap);
 
     let successfulFinds = 0;
     let totalItems = 0;
+    let errorCount = 0;
 
-    // Process each row in the CSV
-    const processedRows = await Promise.all(
-      csvData.map(async (row, index) => {
-        try {
-          // Skip empty rows
-          if (!row['Item #']) {
-            console.log(`⏭️ Skipping empty row ${index + 1}`);
-            return null;
-          }
+    // CHANGE: Process rows sequentially to avoid rate limiting and ensure all rows are processed
+    const processedRows = [];
+    
+    for (let index = 0; index < csvData.length; index++) {
+      const row = csvData[index];
+      
+      try {
+        // Skip empty rows
+        if (!row['Item #']) {
+          console.log(`⏭️ Skipping empty row ${index + 1}`);
+          continue;
+        }
 
-          totalItems++;
+        totalItems++;
+        console.log(`📍 Processing item ${totalItems}/${csvData.length}: ${row['Item #']}`);
 
-          // Build comprehensive search query by combining multiple fields
-          const searchParts = [
-            row['Description'],           // Detailed product description
-            row['Item Description'],      // Generic description  
-            row['Brand or Manufacturer']  // Brand info
-          ].filter(part => 
-            part && 
-            part.trim() !== '' && 
-            part !== 'No Brand' &&       // Skip "No Brand" entries
-            part !== '�'                 // Skip placeholder characters
-          );
+        // Build search query using detected columns
+        const searchParts = [
+          row[columnMap.description] || row['Description'] || row['Desc'],
+          row['Item Description'],      
+          row['Brand or Manufacturer']  
+        ].filter(part => 
+          part && 
+          part.trim() !== '' && 
+          part !== 'No Brand' &&       
+          part !== '�'                 
+        );
 
-          const combinedQuery = searchParts.join(' ').trim();
-          
-          console.log(`🔧 DEBUG - Row ${row['Item #']} Search parts:`, searchParts);
-          console.log(`🚀 Fast search for: "${combinedQuery}"`);
+        const combinedQuery = searchParts.join(' ').trim();
 
-          // Skip if no meaningful search terms
-          if (!combinedQuery) {
-            console.log(`⚠️ No search terms for row ${row['Item #']}`);
-            return {
-              ...row,
-              'Price': '',
-              'Cat': '',
-              'Sub Cat': '',
-              'Source': '',
-              'URL': '',
-              'Pricer': 'Manual Validation Required',
-              'Search Status': 'No Search Terms',
-              'Search Query Used': combinedQuery || 'No valid search terms'
-            };
-          }
-
-          // Get target price for price tolerance calculations
-          const targetPrice = parseFloat(row['Cost to Replace Pre-Tax (each)']) || null;
-
-          // Call the pricing service with the combined query
-          const result = await insuranceItemPricer.findBestPrice(combinedQuery, targetPrice);
-
-          if (result && result.found) {
-            successfulFinds++;
-            return {
-              ...row,
-              'Price': result.price,
-              'Cat': result.category || 'HSW',
-              'Sub Cat': result.subcategory || 'General',
-              'Source': result.source,
-              'URL': result.url,
-              'Pricer': 'AI-Enhanced',
-              'Search Status': 'Found',
-              'Search Query Used': combinedQuery,
-              'Description': result.description || row['Description'] || row['Item Description']
-            };
-          } else {
-            return {
-              ...row,
-              'Price': '',
-              'Cat': '',
-              'Sub Cat': '',
-              'Source': '',
-              'URL': '',
-              'Pricer': 'Manual Validation Required',
-              'Search Status': 'No Results Found',
-              'Search Query Used': combinedQuery
-            };
-          }
-        } catch (error) {
-          console.error(`❌ Error processing row ${index + 1}:`, error.message);
-          return {
+        // Skip if no meaningful search terms
+        if (!combinedQuery) {
+          console.log(`⚠️ No search terms for row ${row['Item #']}`);
+          processedRows.push({
             ...row,
             'Price': '',
             'Cat': '',
             'Sub Cat': '',
             'Source': '',
             'URL': '',
-            'Pricer': 'Error - Manual Review Required',
-            'Search Status': 'Processing Error',
-            'Search Query Used': 'Error during processing'
-          };
+            'Pricer': 'Manual Validation Required',
+            'Search Status': 'No Search Terms',
+            'Search Query Used': combinedQuery || 'No valid search terms'
+          });
+          continue;
         }
-      })
-    );
 
-    // Filter out null entries (empty rows)
-    const validProcessedRows = processedRows.filter(row => row !== null);
+       // Get target price for price tolerance calculations
+       const targetPrice = parseFloat(row['Cost to Replace Pre-Tax (each)']) || null;
+
+        // ADD DEBUGGING HERE - INSERT THESE LINES:
+        if (row['Item #'] == 1) { // Debug first item specifically
+          console.log(`🔧 DEBUG - Item #1 (Toilet Brush):`);
+          console.log(`   Description: "${row['Item Description']}"`);
+          console.log(`   Target Price: ${targetPrice}`);
+          console.log(`   Tolerance: ${tolerance}%`);
+          console.log(`   Search Query: "${combinedQuery}"`);
+          console.log(`   Expected Range: $${targetPrice ? (targetPrice * (1 - tolerance/100)).toFixed(2) : 'N/A'} - $${targetPrice ? (targetPrice * (1 + tolerance/100)).toFixed(2) : 'N/A'}`);
+        }
+
+        // Call the pricing service
+        const result = await insuranceItemPricer.findBestPrice(combinedQuery, targetPrice, tolerance);
+
+        // ADD MORE DEBUGGING HERE:
+        if (row['Item #'] == 1) { // Debug first item specifically
+          console.log(`   Result Found: ${result ? result.found : 'null'}`);
+          console.log(`   Result Price: ${result && result.found ? result.price : 'N/A'}`);
+          console.log(`   ========================================`);
+        }
+
+        if (result && result.found) {
+          successfulFinds++;
+          processedRows.push({
+            ...row,
+            'Price': result.price,
+            'Cat': result.category || 'HSW',
+            'Sub Cat': result.subcategory || 'General',
+            'Source': result.source,
+            'URL': result.url,
+            'Pricer': 'AI-Enhanced',
+            'Search Status': 'Found',
+            'Search Query Used': combinedQuery,
+            'Description': result.description || row[columnMap.description] || row['Description'] || row['Desc'] || row['Item Description']
+          });
+        } else {
+          processedRows.push({
+            ...row,
+            'Price': '',
+            'Cat': '',
+            'Sub Cat': '',
+            'Source': '',
+            'URL': '',
+            'Pricer': 'Manual Validation Required',
+            'Search Status': 'No Results Found',
+            'Search Query Used': combinedQuery
+          });
+        }
+        // CHANGE: Add delay between requests to avoid rate limiting
+        if (index < csvData.length - 1) {
+          await delay(300); // 300ms delay between requests
+        }
+
+      } catch (error) {
+        console.error(`❌ Error processing row ${index + 1}:`, error.message);
+        errorCount++;
+        
+        processedRows.push({
+          ...row,
+          'Price': '',
+          'Cat': '',
+          'Sub Cat': '',
+          'Source': '',
+          'URL': '',
+          'Pricer': 'Error - Manual Review Required',
+          'Search Status': 'Processing Error',
+          'Search Query Used': 'Error during processing'
+        });
+
+        // Continue processing even if one item fails
+        continue;
+      }
+    }
 
     // Calculate processing time and success rate
     const processingTime = Math.round((Date.now() - startTime) / 1000);
     const successRate = totalItems > 0 ? Math.round((successfulFinds / totalItems) * 100) : 0;
 
     // Convert back to CSV
-    const outputCsv = Papa.unparse(validProcessedRows);
+    const outputCsv = Papa.unparse(processedRows);
 
-    // Prepare response matching your interface expectations
+    // CHANGE: Enhanced response with more detailed statistics
     const response = {
       success: true,
       message: 'CSV processed successfully',
       summary: {
         totalItems,
         successfulFinds,
+        errorCount,
         successRate: `${successRate}%`,
-        processingTime: `${processingTime}s`
+        processingTime: `${processingTime}s`,
+        tolerance: `±${tolerance}%`,
+        columnMappingUsed: columnMap,
+        totalRowsProcessed: processedRows.length // CHANGE: Add total processed count
       },
-      results: validProcessedRows,
+      results: processedRows,
       outputCsv: outputCsv
     };
 
-    console.log(`✅ Successfully processed ${totalItems} items (${successfulFinds} found, ${successRate}% success rate)`);
+    console.log(`✅ Successfully processed ${totalItems} items (${successfulFinds} found, ${errorCount} errors, ${successRate}% success rate)`);
 
     res.json(response);
 
@@ -209,10 +323,11 @@ router.post('/api/process-item', async (req, res) => {
 
     const combinedQuery = searchParts.join(' ').trim();
     const targetPrice = costToReplace ? parseFloat(costToReplace) : null;
+    const toleranceValue = tolerance ? parseInt(tolerance) : 10;
 
     console.log(`🔍 Single item test: "${combinedQuery}"`);
     
-    const result = await insuranceItemPricer.findBestPrice(combinedQuery, targetPrice);
+    const result = await insuranceItemPricer.findBestPrice(combinedQuery, targetPrice, toleranceValue);
     
     let responseResult;
     
@@ -269,94 +384,97 @@ router.post('/process-csv', upload.single('csvFile'), async (req, res) => {
       return res.status(500).json({ error: 'Pricing service not available. Check SERPAPI_KEY configuration.' });
     }
 
-    // Parse CSV file
-    const csvText = req.file.buffer.toString('utf-8');
-    const parseResult = Papa.parse(csvText, {
-      header: true,
-      skipEmptyLines: true,
-      dynamicTyping: true
-    });
-
-    const csvData = parseResult.data;
+    const csvData = parseFileData(req.file);
     console.log(`📊 Processing ${csvData.length} rows from CSV`);
 
-    // Process each row
-    const processedRows = await Promise.all(
-      csvData.map(async (row, index) => {
-        try {
-          if (!row['Item #']) {
-            return null;
-          }
+    const headers = Object.keys(csvData[0] || {});
+    const columnMap = detectColumns(headers);
 
-          const searchParts = [
-            row['Description'],
-            row['Item Description'],
-            row['Brand or Manufacturer']
-          ].filter(part => 
-            part && 
-            part.trim() !== '' && 
-            part !== 'No Brand' &&
-            part !== '�'
-          );
+    // CHANGE: Process sequentially for backward compatibility route too
+    const processedRows = [];
+    
+    for (let index = 0; index < csvData.length; index++) {
+      const row = csvData[index];
+      
+      try {
+        if (!row['Item #']) {
+          continue;
+        }
 
-          const combinedQuery = searchParts.join(' ').trim();
-          
-          if (!combinedQuery) {
-            return {
-              ...row,
-              'Price': '',
-              'Cat': '',
-              'Sub Cat': '',
-              'Source': '',
-              'URL': '',
-              'Pricer': 'Manual Validation Required',
-              'Search Status': 'No Search Terms'
-            };
-          }
+        const searchParts = [
+          row[columnMap.description] || row['Description'] || row['Desc'],
+          row['Item Description'],
+          row['Brand or Manufacturer']
+        ].filter(part => 
+          part && 
+          part.trim() !== '' && 
+          part !== 'No Brand' &&
+          part !== '�'
+        );
 
-          const targetPrice = parseFloat(row['Cost to Replace Pre-Tax (each)']) || null;
-          const result = await insuranceItemPricer.findBestPrice(combinedQuery, targetPrice);
-
-          if (result && result.found) {
-            return {
-              ...row,
-              'Price': result.price,
-              'Cat': result.category || 'HSW',
-              'Sub Cat': result.subcategory || 'General',
-              'Source': result.source,
-              'URL': result.url,
-              'Pricer': 'AI-Enhanced',
-              'Search Status': 'Found'
-            };
-          } else {
-            return {
-              ...row,
-              'Price': '',
-              'Cat': '',
-              'Sub Cat': '',
-              'Source': '',
-              'URL': '',
-              'Pricer': 'Manual Validation Required',
-              'Search Status': 'No Results Found'
-            };
-          }
-        } catch (error) {
-          return {
+        const combinedQuery = searchParts.join(' ').trim();
+        
+        if (!combinedQuery) {
+          processedRows.push({
             ...row,
             'Price': '',
             'Cat': '',
             'Sub Cat': '',
             'Source': '',
             'URL': '',
-            'Pricer': 'Error - Manual Review Required',
-            'Search Status': 'Processing Error'
-          };
+            'Pricer': 'Manual Validation Required',
+            'Search Status': 'No Search Terms'
+          });
+          continue;
         }
-      })
-    );
 
-    const validProcessedRows = processedRows.filter(row => row !== null);
-    const outputCsv = Papa.unparse(validProcessedRows);
+        const targetPrice = parseFloat(row['Cost to Replace Pre-Tax (each)']) || null;
+        const result = await insuranceItemPricer.findBestPrice(combinedQuery, targetPrice, 10);
+
+        if (result && result.found) {
+          processedRows.push({
+            ...row,
+            'Price': result.price,
+            'Cat': result.category || 'HSW',
+            'Sub Cat': result.subcategory || 'General',
+            'Source': result.source,
+            'URL': result.url,
+            'Pricer': 'AI-Enhanced',
+            'Search Status': 'Found'
+          });
+        } else {
+          processedRows.push({
+            ...row,
+            'Price': '',
+            'Cat': '',
+            'Sub Cat': '',
+            'Source': '',
+            'URL': '',
+            'Pricer': 'Manual Validation Required',
+            'Search Status': 'No Results Found'
+          });
+        }
+
+        // Add delay to avoid rate limiting
+        if (index < csvData.length - 1) {
+          await delay(300);
+        }
+
+      } catch (error) {
+        processedRows.push({
+          ...row,
+          'Price': '',
+          'Cat': '',
+          'Sub Cat': '',
+          'Source': '',
+          'URL': '',
+          'Pricer': 'Error - Manual Review Required',
+          'Search Status': 'Processing Error'
+        });
+      }
+    }
+
+    const outputCsv = Papa.unparse(processedRows);
 
     // Send CSV file for download
     res.setHeader('Content-Type', 'text/csv');
@@ -384,7 +502,7 @@ router.post('/single-item-test', async (req, res) => {
 
     console.log(`🔍 Single item test: "${query}"`);
     
-    const result = await insuranceItemPricer.findBestPrice(query, targetPrice);
+    const result = await insuranceItemPricer.findBestPrice(query, targetPrice, 10);
     
     res.json(result);
   } catch (error) {

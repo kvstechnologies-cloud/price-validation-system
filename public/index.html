@@ -358,13 +358,70 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+
+        /* NEW: Pagination styles */
+        .pagination-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin: 20px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border: 1px solid #e9ecef;
+        }
+
+        .pagination-info {
+            font-weight: 600;
+            color: #495057;
+        }
+
+        .pagination-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .pagination-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s ease;
+        }
+
+        .pagination-btn:hover:not(:disabled) {
+            background: #5a67d8;
+        }
+
+        .pagination-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .page-size-selector {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        .page-size-selector select {
+            padding: 5px 8px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🏠 Insurance Item Pricing System</h1>
-            <p>Automated replacement cost validation with 10% tolerance matching</p>
+            <p>Automated replacement cost validation with flexible tolerance matching</p>
         </div>
 
         <div class="tabs">
@@ -382,9 +439,9 @@
 
             <div class="upload-area" onclick="document.getElementById('csvFile').click()">
                 <div class="upload-icon">📄</div>
-                <h3>Click to upload or drag and drop your CSV file</h3>
-                <p>Supports files up to 10MB</p>
-                <input type="file" id="csvFile" class="file-input" accept=".csv" onchange="handleFileSelect(event)">
+                <h3>Click to upload or drag and drop your CSV/Excel file</h3>
+                <p>Supports CSV, XLSX, and XLS files up to 10MB</p>
+                <input type="file" id="csvFile" class="file-input" accept=".csv,.xlsx,.xls" onchange="handleFileSelect(event)">
             </div>
 
             <div class="two-column">
@@ -408,7 +465,7 @@
             </div>
 
             <button id="processBtn" class="process-btn" onclick="processCSV()" disabled>
-                🚀 Process CSV File
+                🚀 Process CSV/Excel File
             </button>
 
             <div id="progressSection" class="progress-section">
@@ -481,11 +538,12 @@
             <h2>How to Use This System</h2>
             
             <div style="background: #f8f9fa; padding: 30px; border-radius: 10px; margin-bottom: 30px;">
-                <h3>📋 CSV File Requirements</h3>
-                <p>Your CSV file must contain these columns:</p>
+                <h3>📋 CSV/Excel File Requirements</h3>
+                <p>Your file must contain these columns:</p>
                 <ul style="margin: 15px 0; padding-left: 30px;">
                     <li><strong>Item #</strong> - Unique identifier for each item</li>
                     <li><strong>Item Description</strong> - Description of the item</li>
+                    <li><strong>Description or Desc</strong> - (Optional) Detailed description</li>
                     <li><strong>Brand or Manufacturer</strong> - (Optional) Brand name</li>
                     <li><strong>Model#</strong> - (Optional) Model number</li>
                     <li><strong>Cost to Replace Pre-Tax (each)</strong> - (Optional) Target replacement cost</li>
@@ -536,6 +594,11 @@
 
     <script>
         let selectedFile = null;
+        
+        // NEW: Global pagination variables
+        let currentResults = [];
+        let currentPage = 1;
+        let pageSize = 20;
 
         function switchTab(tabName) {
             // Hide all tab contents
@@ -572,27 +635,40 @@
                 document.getElementById('processBtn').disabled = false;
 
                 // Validate CSV structure
-                validateCSV(file);
+                validateFile(file);
             }
         }
 
-        function validateCSV(file) {
+        function validateFile(file) {
             const reader = new FileReader();
             reader.onload = function(e) {
-                const csvText = e.target.result;
-                const lines = csvText.split('\n');
-                const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-                
-                const requiredFields = ['Item #', 'Item Description'];
-                const hasRequired = requiredFields.every(field => 
-                    headers.some(header => header.includes(field))
-                );
+                try {
+                    const fileText = e.target.result;
+                    let headers = [];
+                    
+                    if (file.name.endsWith('.csv')) {
+                        const lines = fileText.split('\n');
+                        headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+                    } else {
+                        // For Excel files, we'll check after upload
+                        const fileStatus = document.getElementById('fileStatus');
+                        fileStatus.innerHTML += '<br><span style="color: #667eea;">📊 Excel file detected - will validate during processing</span>';
+                        return;
+                    }
+                    
+                    const requiredFields = ['Item #', 'Item Description'];
+                    const hasRequired = requiredFields.every(field => 
+                        headers.some(header => header.includes(field))
+                    );
 
-                const fileStatus = document.getElementById('fileStatus');
-                if (hasRequired) {
-                    fileStatus.innerHTML += '<br><span style="color: #28a745;">✓ CSV format validated</span>';
-                } else {
-                    fileStatus.innerHTML += '<br><span style="color: #dc3545;">⚠ Missing required columns</span>';
+                    const fileStatus = document.getElementById('fileStatus');
+                    if (hasRequired) {
+                        fileStatus.innerHTML += '<br><span style="color: #28a745;">✓ CSV format validated</span>';
+                    } else {
+                        fileStatus.innerHTML += '<br><span style="color: #dc3545;">⚠ Missing required columns</span>';
+                    }
+                } catch (error) {
+                    console.log('File validation skipped for binary format');
                 }
             };
             reader.readAsText(file);
@@ -600,7 +676,7 @@
 
         async function processCSV() {
             if (!selectedFile) {
-                alert('Please select a CSV file first');
+                alert('Please select a file first');
                 return;
             }
 
@@ -640,11 +716,15 @@
                 showError('Processing failed: ' + error.message);
             } finally {
                 processBtn.disabled = false;
-                processBtn.textContent = '🚀 Process CSV File';
+                processBtn.textContent = '🚀 Process CSV/Excel File';
             }
         }
 
         function displayResults(data) {
+            // NEW: Store results globally for pagination
+            currentResults = data.results;
+            currentPage = 1;
+            
             const resultsSection = document.getElementById('resultsSection');
             
             const html = `
@@ -676,7 +756,71 @@
                     <button class="download-btn" onclick="downloadReport()">📊 Download Summary Report</button>
                 </div>
 
-                <h3>Sample Results (First 20 items)</h3>
+                <div id="paginatedResultsContainer">
+                    <!-- NEW: Paginated results will be rendered here -->
+                </div>
+            `;
+
+            resultsSection.innerHTML = html;
+            resultsSection.style.display = 'block';
+
+            // Store results for download
+            window.processedData = data;
+            
+            // NEW: Render first page
+            renderPaginatedResults();
+        }
+
+        // NEW: Function to render paginated results
+        function renderPaginatedResults() {
+            const container = document.getElementById('paginatedResultsContainer');
+            
+            if (!currentResults || currentResults.length === 0) {
+                container.innerHTML = '<p>No results to display.</p>';
+                return;
+            }
+            
+            const totalPages = Math.ceil(currentResults.length / pageSize);
+            const startIndex = (currentPage - 1) * pageSize;
+            const endIndex = Math.min(startIndex + pageSize, currentResults.length);
+            const pageResults = currentResults.slice(startIndex, endIndex);
+            
+            // Create pagination controls
+            const paginationHtml = `
+                <div class="pagination-container">
+                    <div class="pagination-info">
+                        Showing ${startIndex + 1}-${endIndex} of ${currentResults.length} results
+                    </div>
+                    <div class="pagination-controls">
+                        <div class="page-size-selector">
+                            <label>Show:</label>
+                            <select onchange="changePageSize(this.value)">
+                                <option value="10" ${pageSize === 10 ? 'selected' : ''}>10</option>
+                                <option value="20" ${pageSize === 20 ? 'selected' : ''}>20</option>
+                                <option value="50" ${pageSize === 50 ? 'selected' : ''}>50</option>
+                                <option value="100" ${pageSize === 100 ? 'selected' : ''}>100</option>
+                            </select>
+                        </div>
+                        <button class="pagination-btn" onclick="goToPage(1)" ${currentPage === 1 ? 'disabled' : ''}>
+                            ⏮️ First
+                        </button>
+                        <button class="pagination-btn" onclick="goToPage(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>
+                            ⬅️ Previous
+                        </button>
+                        <span>Page ${currentPage} of ${totalPages}</span>
+                        <button class="pagination-btn" onclick="goToPage(${currentPage + 1})" ${currentPage === totalPages ? 'disabled' : ''}>
+                            Next ➡️
+                        </button>
+                        <button class="pagination-btn" onclick="goToPage(${totalPages})" ${currentPage === totalPages ? 'disabled' : ''}>
+                            Last ⏭️
+                        </button>
+                    </div>
+                </div>
+            `;
+            
+            // Create results table (keeping your existing table structure)
+            let tableHtml = `
+                <h3>Results (Page ${currentPage} of ${totalPages})</h3>
                 <div style="overflow-x: auto;">
                     <table class="results-table">
                         <thead>
@@ -691,7 +835,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                            ${data.results.slice(0, 20).map(item => `
+                            ${pageResults.map(item => `
                                 <tr>
                                     <td>${item['Item #'] || 'N/A'}</td>
                                     <td>${item['Item Description'] || 'N/A'}</td>
@@ -711,12 +855,23 @@
                     </table>
                 </div>
             `;
+            
+            container.innerHTML = paginationHtml + tableHtml + paginationHtml;
+        }
 
-            resultsSection.innerHTML = html;
-            resultsSection.style.display = 'block';
+        // NEW: Pagination helper functions
+        function goToPage(page) {
+            const totalPages = Math.ceil(currentResults.length / pageSize);
+            if (page >= 1 && page <= totalPages) {
+                currentPage = page;
+                renderPaginatedResults();
+            }
+        }
 
-            // Store results for download
-            window.processedData = data;
+        function changePageSize(newSize) {
+            pageSize = parseInt(newSize);
+            currentPage = 1; // Reset to first page
+            renderPaginatedResults();
         }
 
         function getStatusClass(status) {
@@ -944,18 +1099,18 @@
 
             if (files.length > 0) {
                 const file = files[0];
-                if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
+                if (file.type === 'text/csv' || file.name.endsWith('.csv') || 
+                    file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
                     document.getElementById('csvFile').files = files;
                     handleFileSelect({ target: { files: files } });
                 } else {
-                    showError('Please upload a CSV file only.');
+                    showError('Please upload a CSV or Excel file only.');
                 }
             }
         }
 
-        // Initialize tooltips or help text
+        // Initialize
         document.addEventListener('DOMContentLoaded', function() {
-            // Add any initialization code here
             console.log('Insurance Item Pricing System initialized');
             
             // Check if API is available
