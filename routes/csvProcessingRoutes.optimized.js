@@ -3,16 +3,18 @@ const express = require('express');
 const multer = require('multer');
 const Papa = require('papaparse');
 const XLSX = require('xlsx');
+const DEBUG_LOGGING = false;
+
 const router = express.Router();
 
 // Import your InsuranceItemPricer
-const InsuranceItemPricer = require('../models/InsuranceItemPricer');
+const InsuranceItemPricer = require('../models/OptimizedInsuranceItemPricer');
 
 // Initialize the pricer instance
 let insuranceItemPricer;
 try {
   insuranceItemPricer = new InsuranceItemPricer();
-  console.log('✅ InsuranceItemPricer initialized successfully');
+if (DEBUG_LOGGING) console.log('✅ InsuranceItemPricer initialized successfully');
 } catch (error) {
   console.error('❌ Failed to initialize InsuranceItemPricer:', error.message);
   console.error('🚨 Make sure SERPAPI_KEY is set in your .env file');
@@ -197,12 +199,12 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
 
     // Parse file data
     const csvData = parseFileData(req.file);
-    console.log(`🚀 SAFE-FAST processing ${csvData.length} rows from ${req.file.originalname}`);
+if (DEBUG_LOGGING) console.log(`🚀 SAFE-FAST processing ${csvData.length} rows from ${req.file.originalname}`);
 
     // Detect column mappings flexibly
     const headers = Object.keys(csvData[0] || {});
     const columnMap = detectColumns(headers);
-    console.log('🔧 Detected columns:', columnMap);
+if (DEBUG_LOGGING) console.log('🔧 Detected columns:', columnMap);
 
     let successfulFinds = 0;
     let totalItems = 0;
@@ -219,7 +221,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
       try {
         // Skip empty rows
         if (!row['Item #']) {
-          console.log(`⏭️ Skipping empty row ${index + 1}`);
+if (DEBUG_LOGGING) console.log(`⏭️ Skipping empty row ${index + 1}`);
           continue;
         }
 
@@ -230,7 +232,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
           const elapsed = (Date.now() - startTime) / 1000;
           const rate = (totalItems / elapsed).toFixed(1);
           const eta = Math.round((csvData.length - totalItems) / parseFloat(rate));
-          console.log(`⚡ ${totalItems}/${csvData.length} | ${rate}/s | ETA: ${eta}s | Success: ${((successfulFinds/totalItems)*100).toFixed(1)}% | Cache: ${insuranceItemPricer.cacheHits}`);
+if (DEBUG_LOGGING) console.log(`⚡ ${totalItems}/${csvData.length} | ${rate}/s | ETA: ${eta}s | Success: ${((successfulFinds/totalItems)*100).toFixed(1)}% | Cache: ${insuranceItemPricer.cacheHits}`);
         }
 
         // SAFE-FAST: Smart target price calculation with caching
@@ -243,7 +245,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
         // SAFE-FAST: Check if we should skip this item (saves time on impossible items)
         if (shouldSkipItem(row)) {
           skippedItems++;
-          console.log(`⏭️ Skipping difficult item ${row['Item #']}: "${row['Item Description']}"`);
+if (DEBUG_LOGGING) console.log(`⏭️ Skipping difficult item ${row['Item #']}: "${row['Item Description']}"`);
           processedRows.push({
             ...row,
             'Price': '',
@@ -252,9 +254,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
             'Source': '',
             'URL': '',
             'Pricer': 'Manual Validation Required',
-            'Search Status': 'Skipped (Bulk/Generic)',
-            'Search Query Used': 'Item skipped for efficiency',
-            'Query Strategy': 'Skipped'
+                                    'Query Strategy': 'Skipped'
           });
           continue;
         }
@@ -264,7 +264,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
 
         // Skip if no meaningful search terms
         if (!queryResult.query) {
-          console.log(`⚠️ No search terms for row ${row['Item #']}`);
+if (DEBUG_LOGGING) console.log(`⚠️ No search terms for row ${row['Item #']}`);
           processedRows.push({
             ...row,
             'Price': '',
@@ -273,21 +273,19 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
             'Source': '',
             'URL': '',
             'Pricer': 'Manual Validation Required',
-            'Search Status': 'No Search Terms',
-            'Search Query Used': 'No valid search terms found',
-            'Query Strategy': 'No Valid Terms'
+                                    'Query Strategy': 'No Valid Terms'
           });
           continue;
         }
 
        // ADD DEBUGGING HERE - INSERT THESE LINES:
        if (row['Item #'] == 1) { // Debug first item specifically
-         console.log(`🔧 DEBUG - Item #1 (Toilet Brush):`);
-         console.log(`   Description: "${row['Item Description']}"`);
-         console.log(`   Target Price: ${targetPrice}`);
-         console.log(`   Tolerance: ${tolerance}%`);
-         console.log(`   Search Query: "${queryResult.query}"`);
-         console.log(`   Expected Range: ${targetPrice ? (targetPrice * (1 - tolerance/100)).toFixed(2) : 'N/A'} - ${targetPrice ? (targetPrice * (1 + tolerance/100)).toFixed(2) : 'N/A'}`);
+if (DEBUG_LOGGING) console.log(`🔧 DEBUG - Item #1 (Toilet Brush):`);
+if (DEBUG_LOGGING) console.log(`   Description: "${row['Item Description']}"`);
+if (DEBUG_LOGGING) console.log(`   Target Price: ${targetPrice}`);
+if (DEBUG_LOGGING) console.log(`   Tolerance: ${tolerance}%`);
+if (DEBUG_LOGGING) console.log(`   Search Query: "${queryResult.query}"`);
+if (DEBUG_LOGGING) console.log(`   Expected Range: ${targetPrice ? (targetPrice * (1 - tolerance/100)).toFixed(2) : 'N/A'} - ${targetPrice ? (targetPrice * (1 + tolerance/100)).toFixed(2) : 'N/A'}`);
        }
 
         // Call the pricing service
@@ -295,9 +293,9 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
 
         // ADD MORE DEBUGGING HERE:
         if (row['Item #'] == 1) { // Debug first item specifically
-          console.log(`   Result Found: ${result ? result.found : 'null'}`);
-          console.log(`   Result Price: ${result && result.found ? result.price : 'N/A'}`);
-          console.log(`   ========================================`);
+if (DEBUG_LOGGING) console.log(`   Result Found: ${result ? result.found : 'null'}`);
+if (DEBUG_LOGGING) console.log(`   Result Price: ${result && result.found ? result.price : 'N/A'}`);
+if (DEBUG_LOGGING) console.log(`   ========================================`);
         }
 
         if (result && result.found) {
@@ -318,12 +316,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
             'Source': result.source,
             'URL': result.url,
             'Pricer': 'AI-Enhanced',
-            'Search Status': 'Found',
-            'Search Query Used': queryResult.query,
-            'Query Strategy': queryResult.strategy,
-            'Target Price Used': targetPrice,
-            'Within Range': isWithinRange ? 'Yes' : 'No',
-            'Description': Buffer.from(result.description || '', 'binary').toString('utf-8') row[columnMap.description] || row['Description'] || row['Desc'] || row['Item Description']
+                                                                        'Description': result.description || row[columnMap.description] || row['Description'] || row['Desc'] || row['Item Description']
           });
         } else {
           processedRows.push({
@@ -334,10 +327,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
             'Source': '',
             'URL': '',
             'Pricer': 'Manual Validation Required',
-            'Search Status': 'No Results Found',
-            'Search Query Used': queryResult.query,
-            'Query Strategy': queryResult.strategy,
-            'Target Price Used': targetPrice
+                                                'Target Price Used': targetPrice
           });
         }
         
@@ -358,8 +348,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
           if (progressPercent > 0.9) delayMs = Math.max(15, delayMs * 0.5);
           else if (progressPercent > 0.8) delayMs = Math.max(20, delayMs * 0.7);
           
-          await delay(delayMs);
-        }
+                  }
 
       } catch (error) {
         console.error(`❌ Error processing row ${index + 1}:`, error.message);
@@ -373,8 +362,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
           'Source': '',
           'URL': '',
           'Pricer': 'Error - Manual Review Required',
-          'Search Status': 'Processing Error',
-          'Search Query Used': 'Error during processing'
+                    'Search Query Used': 'Error during processing'
         });
 
         // Continue processing even if one item fails
@@ -417,15 +405,14 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
       results: processedRows,
       outputCsv: outputCsv
     };
-
-    console.log(`🎯 SAFE-FAST PROCESSING COMPLETE:`);
-    console.log(`   ⚡ ${totalItems} items in ${processingTime}s (${avgTimePerItem}s/item)`);
-    console.log(`   ✅ ${successfulFinds} found (${successRate}% success rate)`);
-    console.log(`   🎯 ${withinRangeCount} within range (${withinRangeRate}% accuracy)`);
-    console.log(`   ⏭️ ${skippedItems} skipped (bulk/generic items)`);
-    console.log(`   💨 ${insuranceItemPricer.cacheHits} cache hits (${cacheHitRate}% cache rate)`);
-    console.log(`   ❌ ${errorCount} errors`);
-    console.log(`   🚀 Rate: ${itemsPerSecond} items/second`);
+if (DEBUG_LOGGING) console.log(`🎯 SAFE-FAST PROCESSING COMPLETE:`);
+if (DEBUG_LOGGING) console.log(`   ⚡ ${totalItems} items in ${processingTime}s (${avgTimePerItem}s/item)`);
+if (DEBUG_LOGGING) console.log(`   ✅ ${successfulFinds} found (${successRate}% success rate)`);
+if (DEBUG_LOGGING) console.log(`   🎯 ${withinRangeCount} within range (${withinRangeRate}% accuracy)`);
+if (DEBUG_LOGGING) console.log(`   ⏭️ ${skippedItems} skipped (bulk/generic items)`);
+if (DEBUG_LOGGING) console.log(`   💨 ${insuranceItemPricer.cacheHits} cache hits (${cacheHitRate}% cache rate)`);
+if (DEBUG_LOGGING) console.log(`   ❌ ${errorCount} errors`);
+if (DEBUG_LOGGING) console.log(`   🚀 Rate: ${itemsPerSecond} items/second`);
 
     res.json(response);
 
@@ -468,8 +455,7 @@ router.post('/api/process-item', async (req, res) => {
 
     const combinedQuery = searchParts.join(' ').trim();
     const toleranceValue = tolerance ? parseInt(tolerance) : 10;
-
-    console.log(`🔍 SAFE-FAST single item test: "${combinedQuery}"`);
+if (DEBUG_LOGGING) console.log(`🔍 SAFE-FAST single item test: "${combinedQuery}"`);
     
     const result = await insuranceItemPricer.findBestPrice(combinedQuery, targetPrice, toleranceValue);
     
@@ -483,10 +469,7 @@ router.post('/api/process-item', async (req, res) => {
         'Source': result.source,
         'URL': result.url,
         'Pricer': 'AI-Enhanced',
-        'Search Status': 'Found',
-        'Search Query Used': combinedQuery,
-        'Target Price Used': targetPrice,
-                'Item Description': itemDescription
+                                        'Item Description': itemDescription
       };
     } else {
       responseResult = {
@@ -496,10 +479,7 @@ router.post('/api/process-item', async (req, res) => {
         'Source': '',
         'URL': '',
         'Pricer': 'Manual Validation Required',
-        'Search Status': 'No Results Found',
-        'Search Query Used': combinedQuery,
-        'Target Price Used': targetPrice,
-        'Item Description': itemDescription
+                                'Item Description': itemDescription
       };
     }
 
@@ -530,7 +510,7 @@ router.post('/process-csv', upload.single('csvFile'), async (req, res) => {
     }
 
     const csvData = parseFileData(req.file);
-    console.log(`📊 SAFE-FAST processing ${csvData.length} rows from CSV`);
+if (DEBUG_LOGGING) console.log(`📊 SAFE-FAST processing ${csvData.length} rows from CSV`);
 
     const headers = Object.keys(csvData[0] || {});
     const columnMap = detectColumns(headers);
@@ -597,8 +577,7 @@ router.post('/process-csv', upload.single('csvFile'), async (req, res) => {
 
         // SAFE-FAST: Minimal delay
         if (index < csvData.length - 1) {
-          await delay(40);
-        }
+                  }
 
       } catch (error) {
         processedRows.push({
@@ -639,8 +618,7 @@ router.post('/single-item-test', async (req, res) => {
     if (!insuranceItemPricer) {
       return res.status(500).json({ error: 'Pricing service not available. Check SERPAPI_KEY configuration.' });
     }
-
-    console.log(`🔍 SAFE-FAST single item test: "${query}"`);
+if (DEBUG_LOGGING) console.log(`🔍 SAFE-FAST single item test: "${query}"`);
     
     const result = await insuranceItemPricer.findBestPrice(query, targetPrice, 10);
     

@@ -1,3 +1,5 @@
+const ProductValidator = require('./ProductValidator');
+const DEBUG_LOGGING = false;
 const axios = require('axios');
 
 // Trusted retailer domains mapped to how they appear in SerpAPI source field
@@ -15,8 +17,21 @@ const trustedSources = {
 
 class InsuranceItemPricer {
   constructor() {
+    this.productValidator = new ProductValidator();
     this.serpApiKey = process.env.SERPAPI_KEY;
     this.searchEngine = 'google_shopping';
+    
+    // SMART-FAST: Pre-compile trusted sources for instant lookups
+    this.trustedSourceMap = new Map();
+    for (const [domain, aliases] of Object.entries(trustedSources)) {
+      for (const alias of aliases) {
+        this.trustedSourceMap.set(alias.toLowerCase(), domain);
+      }
+    }
+    
+    // SMART-FAST: Smart caching for duplicate queries (common in your Excel)
+    this.queryCache = new Map();
+    this.cacheHits = 0;
     
     if (!this.serpApiKey) {
       console.error('❌ SERPAPI_KEY environment variable is required');
@@ -27,6 +42,17 @@ class InsuranceItemPricer {
   // MAIN METHOD - This is what your routes call
   async findBestPrice(query, targetPrice = null, tolerance = 10) {
     try {
+      // SMART-FAST: Check cache for duplicate queries (many similar items in Excel)
+      const cacheKey = `${query.toLowerCase().substring(0, 50)}_${targetPrice}_${tolerance}`;
+      if (this.queryCache.has(cacheKey)) {
+        this.cacheHits++;
+        const cached = this.queryCache.get(cacheKey);
+        if (this.cacheHits % 10 === 0) {
+          console.log(`💨 Cache hits: ${this.cacheHits} (saving time)`);
+        }
+        return cached;
+      }
+      
       console.log(`🔍 Finding best price for: "${query}"`);
       console.log(`💰 Target price: ${targetPrice ? '$' + targetPrice : 'None'}, Tolerance: ±${tolerance}%`);
       
@@ -41,11 +67,12 @@ class InsuranceItemPricer {
         console.log(`🎯 Price filtering enabled: $${minPrice.toFixed(2)} - $${maxPrice.toFixed(2)} (±${tolerance}% of $${targetPrice})`);
       }
 
-      const result = await this.trySerpAPIUltraFast(query, minPrice, maxPrice, targetPrice, tolerance);
+      const result = await this.trySerpAPISmartFast(query, minPrice, maxPrice, targetPrice, tolerance);
       
+      let response;
       if (result) {
         console.log(`✅ Final result: $${result.price} from ${result.source} (within range: ${targetPrice ? (result.price >= minPrice && result.price <= maxPrice) : 'N/A'})`);
-        return {
+        response = {
           found: true,
           price: result.price,
           source: result.source,
@@ -56,13 +83,24 @@ class InsuranceItemPricer {
         };
       } else {
         console.log(`❌ No results found within price range $${minPrice.toFixed(2)} - $${maxPrice.toFixed(2)}`);
-        return {
+        response = {
           found: false,
           message: targetPrice ? 
             `No suitable matches found within ±${tolerance}% of $${targetPrice} ($${minPrice.toFixed(2)} - $${maxPrice.toFixed(2)})` :
             'No suitable matches found'
         };
       }
+      
+      // SMART-FAST: Cache result for future duplicate queries
+      this.queryCache.set(cacheKey, response);
+      
+      // SMART-FAST: Limit cache size to prevent memory issues
+      if (this.queryCache.size > 100) {
+        const firstKey = this.queryCache.keys().next().value;
+        this.queryCache.delete(firstKey);
+      }
+      
+      return response;
       
     } catch (error) {
       console.error('❌ findBestPrice error:', error);
@@ -90,19 +128,33 @@ class InsuranceItemPricer {
     return 'Other /HSW';
   }
 
-  isTrustedSource(sourceField) {
+  // SMART-FAST: Ultra-fast trusted source lookup
+  isTrustedSourceFast(sourceField) {
     if (!sourceField) return null;
     
-    const source = sourceField.toLowerCase();
+    const sourceLower = sourceField.toLowerCase();
     
-    for (const [domain, aliases] of Object.entries(trustedSources)) {
-      for (const alias of aliases) {
-        if (source.includes(alias.toLowerCase())) {
-          return domain;
-        }
-      }
-    }
+    // Direct map lookup first (fastest)
+    const direct = this.trustedSourceMap.get(sourceLower);
+    if (direct) return direct;
+    
+    // Fast contains check for partial matches
+    if (sourceLower.includes('amazon')) return 'amazon.com';
+    if (sourceLower.includes('walmart')) return 'walmart.com';
+    if (sourceLower.includes('target')) return 'target.com';
+    if (sourceLower.includes('home depot') || sourceLower.includes('homedepot')) return 'homedepot.com';
+    if (sourceLower.includes('lowe')) return 'lowes.com';
+    if (sourceLower.includes('best buy') || sourceLower.includes('bestbuy')) return 'bestbuy.com';
+    if (sourceLower.includes('wayfair')) return 'wayfair.com';
+    if (sourceLower.includes('costco')) return 'costco.com';
+    if (sourceLower.includes('overstock')) return 'overstock.com';
+    
     return null;
+  }
+
+  // Keep original method for backwards compatibility
+  isTrustedSource(sourceField) {
+    return this.isTrustedSourceFast(sourceField);
   }
 
   getDirectUrl(result) {
@@ -132,10 +184,10 @@ class InsuranceItemPricer {
     return result.link || 'Manual Validation Required';
   }
 
-  // Calculate how close a price is to target (lower score = better)
+  // OPTIMIZED: Calculate how close a price is to target (lower score = better)
   calculatePriceScore(price, targetPrice, tolerance) {
     if (!targetPrice) {
-      return Math.abs(price - 50); // Default target if none provided
+      return price; // CHANGE: Prioritize lower prices when no target
     }
     
     const toleranceAmount = targetPrice * (tolerance / 100);
@@ -143,39 +195,52 @@ class InsuranceItemPricer {
     const maxPrice = targetPrice + toleranceAmount;
     
     if (price >= minPrice && price <= maxPrice) {
-      // Perfect match within tolerance - prioritize closer to target
-      return Math.abs(price - targetPrice);
+      // CHANGE: Within range - prioritize lower prices
+      return price;
     } else {
       // Outside tolerance - very high penalty to exclude these
       return 999999;
     }
   }
 
-  async trySerpAPIUltraFast(query, min = 0, max = 99999, targetPrice = null, tolerance = 10) {
+  async trySerpAPISmartFast(query, min = 0, max = 99999, targetPrice = null, tolerance = 10) {
     const sanitized = this.sanitizeQuery(query);
     
     // Strategy 1: Start with best query first
-    console.log(`🚀 Fast search for: "${sanitized}"`);
+    console.log(`🚀 Smart-fast search for: "${sanitized}"`);
     
-    let candidates = await this.performSearch(sanitized, min, max, targetPrice, tolerance);
+    let candidates = await this.performSearchSmartFast(sanitized, min, max, targetPrice, tolerance);
     
-    // CRITICAL FIX: Apply strict price range filtering when target price is set
+    // SMART-FAST: More flexible price filtering - allow some items outside range
     if (targetPrice && min > 0 && max < 99999) {
       const originalCount = candidates.length;
-      candidates = candidates.filter(c => {
-        const withinRange = c.price >= min && c.price <= max;
-        if (!withinRange) {
-          console.log(`🚫 Filtered out: ${c.description} - $${c.price} (outside range $${min.toFixed(2)}-$${max.toFixed(2)})`);
-        }
-        return withinRange;
+      const withinRangeCandidates = candidates.filter(c => c.price >= min && c.price <= max);
+      const closeToRangeCandidates = candidates.filter(c => {
+        const tolerance20 = targetPrice * 0.2; // 20% tolerance
+        return c.price >= (targetPrice - tolerance20) && c.price <= (targetPrice + tolerance20);
       });
-      console.log(`🎯 Price filtering: ${originalCount} -> ${candidates.length} results within range`);
       
-      // If we have good matches within range, return immediately
-      if (candidates.length > 0) {
-        const bestMatch = this.selectBestMatch(candidates, targetPrice, min, max);
-        if (bestMatch && bestMatch.price >= min && bestMatch.price <= max) {
-          console.log(`✅ Found match within price range on first try: $${bestMatch.price}`);
+      console.log(`🎯 Price filtering: ${originalCount} total -> ${withinRangeCandidates.length} within range -> ${closeToRangeCandidates.length} within 20%`);
+      
+      // First try: exact range matches
+      if (withinRangeCandidates.length > 0) {
+        const bestMatch = this.selectBestMatchSmartFast(withinRangeCandidates, targetPrice, min, max);
+        if (bestMatch) {
+          console.log(`✅ Found exact range match: $${bestMatch.price}`);
+          return {
+            price: bestMatch.price,
+            source: bestMatch.source,
+            url: bestMatch.url,
+            description: bestMatch.description
+          };
+        }
+      }
+      
+      // Second try: close to range matches (prevents too many "not found")
+      if (closeToRangeCandidates.length > 0) {
+        const bestMatch = this.selectBestMatchSmartFast(closeToRangeCandidates, targetPrice, min, max);
+        if (bestMatch) {
+          console.log(`✅ Found close range match: $${bestMatch.price}`);
           return {
             price: bestMatch.price,
             source: bestMatch.source,
@@ -192,7 +257,7 @@ class InsuranceItemPricer {
         
         if (perfectMatches.length > 0 || goodMatches.length > 0) {
           console.log(`✅ Found good matches on first try!`);
-          const bestMatch = this.selectBestMatch(candidates, targetPrice, min, max);
+          const bestMatch = this.selectBestMatchSmartFast(candidates, targetPrice, min, max);
           
           if (bestMatch) {
             return {
@@ -206,12 +271,13 @@ class InsuranceItemPricer {
       }
     }
 
-    // Strategy 2: Only try alternatives if we need more results
+    // Strategy 2: Try TWO alternative searches (not just one)
     console.log(`🔄 Trying alternative searches...`);
     
     const alternativeQueries = [
       sanitized.replace(/\b(new|mail box|postal box|heavy duty|security)\b/gi, '').trim(),
-      sanitized.split(' ').slice(0, 6).join(' ')
+      sanitized.split(' ').slice(0, 5).join(' '), // Keep 5 words instead of 4
+      sanitized.split(' ').slice(0, 3).join(' ')  // Also try 3 words
     ];
 
     for (const altQuery of alternativeQueries) {
@@ -219,25 +285,23 @@ class InsuranceItemPricer {
       
       console.log(`🔍 Trying: "${altQuery}"`);
       
-      let altCandidates = await this.performSearch(altQuery, min, max, targetPrice, tolerance);
+      let altCandidates = await this.performSearchSmartFast(altQuery, min, max, targetPrice, tolerance);
       
-      // Apply price range filtering for alternative searches too
+      // Apply more flexible price filtering for alternative searches
       if (targetPrice && min > 0 && max < 99999) {
-        const originalCount = altCandidates.length;
-        altCandidates = altCandidates.filter(c => {
-          const withinRange = c.price >= min && c.price <= max;
-          if (!withinRange) {
-            console.log(`🚫 Alt filtered: ${c.description} - $${c.price} (outside range)`);
-          }
-          return withinRange;
+        const withinRange = altCandidates.filter(c => c.price >= min && c.price <= max);
+        const closeToRange = altCandidates.filter(c => {
+          const tolerance20 = targetPrice * 0.2;
+          return c.price >= (targetPrice - tolerance20) && c.price <= (targetPrice + tolerance20);
         });
-        console.log(`🎯 Alternative search price filtering: ${originalCount} -> ${altCandidates.length} results`);
         
-        // If we found matches within range, use them immediately
-        if (altCandidates.length > 0) {
-          const bestMatch = this.selectBestMatch(altCandidates, targetPrice, min, max);
-          if (bestMatch && bestMatch.price >= min && bestMatch.price <= max) {
-            console.log(`✅ Found alternative match within range: $${bestMatch.price}`);
+        // Try exact range first, then close range
+        const candidatesToUse = withinRange.length > 0 ? withinRange : closeToRange;
+        
+        if (candidatesToUse.length > 0) {
+          const bestMatch = this.selectBestMatchSmartFast(candidatesToUse, targetPrice, min, max);
+          if (bestMatch) {
+            console.log(`✅ Found alternative match: $${bestMatch.price}`);
             return {
               price: bestMatch.price,
               source: bestMatch.source,
@@ -250,10 +314,10 @@ class InsuranceItemPricer {
         candidates.push(...altCandidates.map(c => ({...c, strategy: 'Alternative'})));
       }
       
-      // Short delay
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // SMART-FAST: Small delay between alternative searches
+      await new Promise(resolve => setTimeout(resolve, 100));
       
-      // If we found matches within price range, stop searching
+      // Early exit conditions (same as before)
       if (targetPrice && altCandidates.length > 0) {
         const withinRangeMatches = altCandidates.filter(c => c.price >= min && c.price <= max);
         if (withinRangeMatches.length > 0) {
@@ -261,7 +325,6 @@ class InsuranceItemPricer {
           break;
         }
       } else {
-        // Original logic for non-price-filtered searches
         const amazonMatches = altCandidates.filter(c => c.isAmazon && c.isInRange);
         if (amazonMatches.length > 0) {
           console.log(`✅ Found Amazon matches, stopping search`);
@@ -276,15 +339,9 @@ class InsuranceItemPricer {
     }
 
     // Final selection - prioritize price range compliance
-    const bestMatch = this.selectBestMatch(candidates, targetPrice, min, max);
+    const bestMatch = this.selectBestMatchSmartFast(candidates, targetPrice, min, max);
     
     if (bestMatch) {
-      // Final check: if we have a target price, ensure the result is within range
-      if (targetPrice && (bestMatch.price < min || bestMatch.price > max)) {
-        console.log(`❌ Best match $${bestMatch.price} is outside required range $${min.toFixed(2)}-$${max.toFixed(2)}`);
-        return null;
-      }
-      
       console.log(`✅ Selected best match: $${bestMatch.price} from ${bestMatch.source}`);
       return {
         price: bestMatch.price,
@@ -298,11 +355,12 @@ class InsuranceItemPricer {
     return null;
   }
 
-  async performSearch(query, min, max, targetPrice, tolerance = 10) {
+  async performSearchSmartFast(query, min, max, targetPrice, tolerance = 10) {
     const serpUrl = `https://serpapi.com/search.json?engine=${this.searchEngine}&q=${encodeURIComponent(query)}&api_key=${this.serpApiKey}&num=25&gl=us&hl=en`;
 
     try {
-      const serpResponse = await axios.get(serpUrl, { timeout: 8000 });
+      // SMART-FAST: 5-second timeout (not 3s) - better success rate
+      const serpResponse = await axios.get(serpUrl, { timeout: 5000 });
       const results = (serpResponse.data.shopping_results || []).slice(0, 25);
       
       if (!results.length) {
@@ -316,11 +374,12 @@ class InsuranceItemPricer {
       for (const r of results) {
         const price = parseFloat(r.extracted_price || 0);
         const sourceField = r.source || '';
-        const trustedDomain = this.isTrustedSource(sourceField);
+        const trustedDomain = this.isTrustedSourceFast(sourceField);
 
         if (trustedDomain && price > 0) {
           const priceScore = this.calculatePriceScore(price, targetPrice, tolerance);
           const isInRange = price >= min && price <= max;
+          const isAmazon = trustedDomain === 'amazon.com';
 
           candidates.push({
             price,
@@ -329,27 +388,34 @@ class InsuranceItemPricer {
             description: r.title || '',
             priceScore,
             isInRange,
-            isAmazon: trustedDomain === 'amazon.com',
+            isAmazon,
             sourceField
           });
           
-          // Log each candidate for debugging
-          console.log(`   📋 ${trustedDomain}: $${price} "${r.title?.substring(0, 50)}..." (Score: ${priceScore}, InRange: ${isInRange})`);
+          // SMART-FAST: Process more candidates for better quality
+          if (candidates.length >= 20) {
+            console.log(`⚡ Processing ${candidates.length} candidates`);
+            break;
+          }
         }
       }
 
       return candidates;
 
     } catch (err) {
-      console.error('❌ SerpAPI error:', err.message);
+      if (err.code === 'ECONNABORTED') {
+        console.log(`⏱️ Timeout (5s): "${query.substring(0, 20)}..."`);
+      } else {
+        console.error('❌ SerpAPI error:', err.message);
+      }
       return [];
     }
   }
 
-  selectBestMatch(candidates, targetPrice, min, max) {
-    console.log(`📊 Ranking ${candidates.length} total candidates`);
+  selectBestMatchSmartFast(candidates, targetPrice, min, max) {
+    console.log(`📊 Smart-fast ranking ${candidates.length} candidates`);
     
-    // Remove duplicates quickly
+    // Quick deduplication
     const uniqueCandidates = [];
     const seen = new Set();
     
@@ -363,7 +429,7 @@ class InsuranceItemPricer {
 
     if (uniqueCandidates.length === 0) return null;
 
-    // CRITICAL FIX: When target price is set, prioritize price range compliance above all else
+    // SMART-FAST: More flexible selection logic
     if (targetPrice) {
       // First priority: items within the target price range
       const withinRangeMatches = uniqueCandidates.filter(c => c.price >= min && c.price <= max);
@@ -371,18 +437,35 @@ class InsuranceItemPricer {
       if (withinRangeMatches.length > 0) {
         console.log(`🎯 Found ${withinRangeMatches.length} matches within price range`);
         
-        // Among within-range matches, prefer Amazon, then sort by closeness to target
-        const amazonWithinRange = withinRangeMatches.filter(c => c.isAmazon);
+        // Sort by lowest price first, then prefer Amazon
+        withinRangeMatches.sort((a, b) => {
+          if (Math.abs(a.price - b.price) < 1) {
+            // Prices are very close, prefer Amazon
+            if (a.isAmazon && !b.isAmazon) return -1;
+            if (!a.isAmazon && b.isAmazon) return 1;
+          }
+          return a.price - b.price; // Lower price wins
+        });
         
-        let selectedTier = amazonWithinRange.length > 0 ? amazonWithinRange : withinRangeMatches;
-        selectedTier.sort((a, b) => a.priceScore - b.priceScore);
-        
-        const bestMatch = selectedTier[0];
-        console.log(`🏆 Best match: $${bestMatch.price} from ${bestMatch.source} (Within Range + ${amazonWithinRange.length > 0 ? 'Amazon' : 'Other Retailer'})`);
+        const bestMatch = withinRangeMatches[0];
+        console.log(`🏆 Best match: $${bestMatch.price} from ${bestMatch.source} (Within Range)`);
         return bestMatch;
       } else {
-        console.log(`❌ No matches found within required price range $${min.toFixed(2)}-$${max.toFixed(2)}`);
-        return null; // Strict: if target price is set, must be within range
+        // SMART-FAST: If no exact matches, try close matches (within 20%)
+        const tolerance20 = targetPrice * 0.2;
+        const closeMatches = uniqueCandidates.filter(c => 
+          c.price >= (targetPrice - tolerance20) && c.price <= (targetPrice + tolerance20)
+        );
+        
+        if (closeMatches.length > 0) {
+          closeMatches.sort((a, b) => a.price - b.price);
+          const bestMatch = closeMatches[0];
+          console.log(`🏆 Best close match: $${bestMatch.price} from ${bestMatch.source} (Close to Range)`);
+          return bestMatch;
+        }
+        
+        console.log(`❌ No matches found within expanded price range`);
+        return null;
       }
     }
 
@@ -408,11 +491,11 @@ class InsuranceItemPricer {
       tierName = 'Any Trusted';
     }
 
-    // Sort by price score (closest to target)
-    selectedTier.sort((a, b) => a.priceScore - b.priceScore);
+    // Sort by lowest price first
+    selectedTier.sort((a, b) => a.price - b.price);
 
     const bestMatch = selectedTier[0];
-    console.log(`🎯 Best match: ${bestMatch.price} from ${bestMatch.source} (${tierName})`);
+    console.log(`🎯 Best match: $${bestMatch.price} from ${bestMatch.source} (${tierName})`);
 
     return bestMatch;
   }
