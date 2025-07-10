@@ -91,11 +91,10 @@ class InsuranceItemPricer {
         };
       }
       
-      // SMART-FAST: Cache result for future duplicate queries
+      // MINOR OPTIMIZATION: Increased cache size for better hit rates
       this.queryCache.set(cacheKey, response);
       
-      // SMART-FAST: Limit cache size to prevent memory issues
-      if (this.queryCache.size > 100) {
+      if (this.queryCache.size > 150) {
         const firstKey = this.queryCache.keys().next().value;
         this.queryCache.delete(firstKey);
       }
@@ -359,8 +358,13 @@ class InsuranceItemPricer {
     const serpUrl = `https://serpapi.com/search.json?engine=${this.searchEngine}&q=${encodeURIComponent(query)}&api_key=${this.serpApiKey}&num=25&gl=us&hl=en`;
 
     try {
-      // SMART-FAST: 5-second timeout (not 3s) - better success rate
-      const serpResponse = await axios.get(serpUrl, { timeout: 5000 });
+      // MINOR OPTIMIZATION: Added User-Agent header for better API compatibility
+      const serpResponse = await axios.get(serpUrl, { 
+        timeout: 5000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
       const results = (serpResponse.data.shopping_results || []).slice(0, 25);
       
       if (!results.length) {
@@ -392,8 +396,8 @@ class InsuranceItemPricer {
             sourceField
           });
           
-          // SMART-FAST: Process more candidates for better quality
-          if (candidates.length >= 20) {
+          // MINOR OPTIMIZATION: Process fewer candidates for speed
+          if (candidates.length >= 15) {
             console.log(`⚡ Processing ${candidates.length} candidates`);
             break;
           }

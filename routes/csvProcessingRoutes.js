@@ -225,8 +225,8 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
 
         totalItems++;
         
-        // SAFE-FAST: Optimized logging frequency
-        if (totalItems % 20 === 0 || totalItems <= 3) {
+        // MINOR OPTIMIZATION: Reduced logging frequency
+        if (totalItems % 25 === 0 || totalItems <= 5) {
           const elapsed = (Date.now() - startTime) / 1000;
           const rate = (totalItems / elapsed).toFixed(1);
           const eta = Math.round((csvData.length - totalItems) / parseFloat(rate));
@@ -280,25 +280,8 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
           continue;
         }
 
-       // ADD DEBUGGING HERE - INSERT THESE LINES:
-       if (row['Item #'] == 1) { // Debug first item specifically
-         console.log(`🔧 DEBUG - Item #1 (Toilet Brush):`);
-         console.log(`   Description: "${row['Item Description']}"`);
-         console.log(`   Target Price: ${targetPrice}`);
-         console.log(`   Tolerance: ${tolerance}%`);
-         console.log(`   Search Query: "${queryResult.query}"`);
-         console.log(`   Expected Range: ${targetPrice ? (targetPrice * (1 - tolerance/100)).toFixed(2) : 'N/A'} - ${targetPrice ? (targetPrice * (1 + tolerance/100)).toFixed(2) : 'N/A'}`);
-       }
-
         // Call the pricing service
         const result = await insuranceItemPricer.findBestPrice(queryResult.query, targetPrice, tolerance);
-
-        // ADD MORE DEBUGGING HERE:
-        if (row['Item #'] == 1) { // Debug first item specifically
-          console.log(`   Result Found: ${result ? result.found : 'null'}`);
-          console.log(`   Result Price: ${result && result.found ? result.price : 'N/A'}`);
-          console.log(`   ========================================`);
-        }
 
         if (result && result.found) {
           successfulFinds++;
@@ -323,7 +306,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
             'Query Strategy': queryResult.strategy,
             'Target Price Used': targetPrice,
             'Within Range': isWithinRange ? 'Yes' : 'No',
-            'Description': Buffer.from(result.description || '', 'binary').toString('utf-8') row[columnMap.description] || row['Description'] || row['Desc'] || row['Item Description']
+            'Description': result.description || row[columnMap.description] || row['Description'] || row['Desc'] || row['Item Description'] || ''
           });
         } else {
           processedRows.push({
@@ -341,22 +324,22 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
           });
         }
         
-        // SAFE-FAST: Ultra-minimal delays with adaptive scaling
+        // MINOR OPTIMIZATION: Slightly more aggressive delays
         if (index < csvData.length - 1) {
           const currentSuccessRate = successfulFinds / totalItems;
           const progressPercent = totalItems / csvData.length;
           
-          let delayMs = 30; // Ultra-minimal base delay
+          let delayMs = 25; // Slightly faster base delay
           
           // Adaptive delay based on performance
-          if (currentSuccessRate > 0.9) delayMs = 20;        // Blazing fast when very successful
-          else if (currentSuccessRate > 0.8) delayMs = 30;   // Very fast when successful  
-          else if (currentSuccessRate > 0.6) delayMs = 50;   // Normal when decent
-          else if (currentSuccessRate < 0.5) delayMs = 80;   // Slower when struggling
+          if (currentSuccessRate > 0.9) delayMs = 15;        // Faster when very successful
+          else if (currentSuccessRate > 0.8) delayMs = 25;   // Faster when successful  
+          else if (currentSuccessRate > 0.6) delayMs = 40;   // Faster when decent
+          else if (currentSuccessRate < 0.5) delayMs = 60;   // Faster when struggling
           
           // Speed up significantly towards the end
-          if (progressPercent > 0.9) delayMs = Math.max(15, delayMs * 0.5);
-          else if (progressPercent > 0.8) delayMs = Math.max(20, delayMs * 0.7);
+          if (progressPercent > 0.9) delayMs = Math.max(12, delayMs * 0.5);
+          else if (progressPercent > 0.8) delayMs = Math.max(18, delayMs * 0.7);
           
           await delay(delayMs);
         }
@@ -388,7 +371,7 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
     const avgTimePerItem = totalItems > 0 ? (processingTime / totalItems).toFixed(2) : 0;
     const withinRangeRate = successfulFinds > 0 ? Math.round((withinRangeCount / successfulFinds) * 100) : 0;
     const itemsPerSecond = totalItems > 0 ? (totalItems / processingTime).toFixed(1) : 0;
-    const cacheHitRate = totalItems > 0 ? Math.round((insuranceItemPricer.cacheHits / totalItems) * 100) : 0; // SAFE-FAST: Cache stats
+    const cacheHitRate = totalItems > 0 ? Math.round((insuranceItemPricer.cacheHits / totalItems) * 100) : 0;
 
     // Convert back to CSV
     const outputCsv = Papa.unparse(processedRows);
@@ -401,14 +384,14 @@ router.post('/api/process-csv', upload.single('csvFile'), async (req, res) => {
         totalItems,
         successfulFinds,
         errorCount,
-        skippedItems, // SAFE-FAST: Report skipped items
+        skippedItems,
         withinRangeCount,
         successRate: `${successRate}%`,
         withinRangeRate: `${withinRangeRate}%`,
         processingTime: `${processingTime}s`,
         averageTimePerItem: `${avgTimePerItem}s`,
         itemsPerSecond: `${itemsPerSecond}`,
-        cacheHitRate: `${cacheHitRate}%`, // SAFE-FAST: Cache efficiency
+        cacheHitRate: `${cacheHitRate}%`,
         tolerance: `±${tolerance}%`,
         columnMappingUsed: columnMap,
         totalRowsProcessed: processedRows.length,
@@ -486,7 +469,7 @@ router.post('/api/process-item', async (req, res) => {
         'Search Status': 'Found',
         'Search Query Used': combinedQuery,
         'Target Price Used': targetPrice,
-                'Item Description': itemDescription
+        'Item Description': itemDescription
       };
     } else {
       responseResult = {
@@ -595,9 +578,9 @@ router.post('/process-csv', upload.single('csvFile'), async (req, res) => {
           });
         }
 
-        // SAFE-FAST: Minimal delay
+        // MINOR OPTIMIZATION: Slightly reduced delay
         if (index < csvData.length - 1) {
-          await delay(40);
+          await delay(35);
         }
 
       } catch (error) {
